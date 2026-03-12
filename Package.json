@@ -1,0 +1,13 @@
+{
+  "name": "talkomatic-keepbot",
+  "version": "1.0.0",
+  "description": "Keeps a Talkomatic room alive forever with live uptime + hardware stats",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.5",
+    "systeminformation": "^5.22.0"
+  }
+}

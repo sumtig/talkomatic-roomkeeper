@@ -1,0 +1,14 @@
+say Hello to Roomkeeper zatr554 edition!
+this is a roomkeeper, which is gonna keep rooms alive. (duh)
+(dis made by zatr554 lol)
+
+this bot is in the room for {uptime} time.
+the current date is {date} and the time is {time}
+there are {users} people in the room. (counting the bot too.)
+
+SOCIELS:
+ - Github: https://github.com/sumtig
+ - Youtube: https://youtu.be/@zatr554
+ - Discord (username): @zatr554
+ 
+please tell me if i need to add anything else and rate it 1 - 10!

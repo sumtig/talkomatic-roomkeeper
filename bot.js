@@ -10,13 +10,17 @@ const CONFIG = {
   token:    "TOKEN_HERE",
   username: "KeepBot",
   location: "The Internet",
-  messageInterval: 1_000,
+  intervalAlone:  15_000,
+  intervalActive:  1_000,
   server: "https://classic.talkomatic.co",
 };
 // ============================================================
 
 const startTime = Date.now();
 let currentUserCount = 0;
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const ask = (q) => new Promise(res => rl.question(q, res));
 
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000);
@@ -39,8 +43,16 @@ function sendMessage(socket, text) {
   socket.emit("chat update", { diff: { type: "full-replace", text } });
 }
 
-function startBot(roomId) {
-  console.log(`[${new Date().toISOString()}] Connecting to ${CONFIG.server} …`);
+function reschedule(socket) {
+  if (socket._interval) clearInterval(socket._interval);
+  const interval = currentUserCount <= 1 ? CONFIG.intervalAlone : CONFIG.intervalActive;
+  console.log(`[${new Date().toISOString()}] Update rate: ${interval / 1000}s (${currentUserCount} user(s))`);
+  socket._interval = setInterval(() => sendMessage(socket, buildMessage()), interval);
+}
+
+// ── Single connection does everything ────────────────────────
+async function run(argRoomId) {
+  console.log(`Connecting to ${CONFIG.server} …`);
 
   const socket = io(CONFIG.server, {
     auth:  { token: CONFIG.token },
@@ -50,49 +62,97 @@ function startBot(roomId) {
     reconnectionDelay: 5_000,
   });
 
-  let postInterval = null;
-
-  socket.on("connect", () => {
-    console.log(`[${new Date().toISOString()}] Connected ✓`);
-    socket.emit("join lobby", { username: CONFIG.username, location: CONFIG.location, token: CONFIG.token });
-    socket.emit("join room", { roomId });
+  socket.on("connect_error", (err) => {
+    console.error(`Connection error: ${err.message}`);
   });
-
-  socket.on("room joined", (data) => {
-    currentUserCount = data.users?.length ?? 0;
-    console.log(`[${new Date().toISOString()}] Joined room! Users: ${currentUserCount}`);
-    sendMessage(socket, buildMessage());
-    if (postInterval) clearInterval(postInterval);
-    postInterval = setInterval(() => sendMessage(socket, buildMessage()), CONFIG.messageInterval);
-  });
-
-  socket.on("user joined", () => { currentUserCount++; });
-  socket.on("user left",   () => { currentUserCount = Math.max(0, currentUserCount - 1); });
 
   socket.on("disconnect", (reason) => {
-    console.warn(`[${new Date().toISOString()}] Disconnected: ${reason} — reconnecting…`);
-    if (postInterval) { clearInterval(postInterval); postInterval = null; }
-  });
-
-  socket.on("connect_error", (err) => {
-    console.error(`[${new Date().toISOString()}] Connection error: ${err.message}`);
+    console.warn(`Disconnected: ${reason} — reconnecting…`);
+    if (socket._interval) { clearInterval(socket._interval); socket._interval = null; }
   });
 
   socket.onAny((event, ...args) => {
-    if (!["chat update", "ping", "pong"].includes(event))
+    if (!["chat update", "ping", "pong", "lobby update"].includes(event))
       console.log(`[EVENT] ${event}`, JSON.stringify(args).slice(0, 120));
   });
+
+  // Wait for connection
+  await new Promise((res, rej) => {
+    socket.once("connect", res);
+    socket.once("connect_error", rej);
+  });
+
+  console.log("Connected ✓");
+  socket.emit("join lobby", { username: CONFIG.username, location: CONFIG.location, token: CONFIG.token });
+
+  let roomId = argRoomId;
+  let accessCode = null;
+
+  if (!roomId) {
+    // Request room list
+    socket.emit("get rooms");
+
+    const rooms = await new Promise(res => socket.once("lobby update", res));
+    const visible = rooms.filter(r => r.type === "public" || r.type === "semi-private");
+
+    if (visible.length === 0) {
+      console.log("No public or semi-private rooms found.");
+      const id = await ask("Enter Room ID manually: ");
+      roomId = id.trim();
+    } else {
+      console.log("\n┌─────────────────────────────────────────────────────┐");
+      console.log("│                   Available Rooms                   │");
+      console.log("├──────┬──────────────────────────────┬───────┬───────┤");
+      console.log("│  #   │ Name                         │ Users │ Type  │");
+      console.log("├──────┼──────────────────────────────┼───────┼───────┤");
+      visible.forEach((r, i) => {
+        const num  = String(i + 1).padEnd(4);
+        const name = (r.name || "Unnamed").substring(0, 28).padEnd(28);
+        const users = `${r.users?.length ?? 0}/5`.padEnd(5);
+        const type = r.type === "semi-private" ? "🔒 semi" : "public";
+        console.log(`│  ${num}│ ${name} │ ${users} │ ${type} │`);
+      });
+      console.log("└──────┴──────────────────────────────┴───────┴───────┘");
+
+      const choice = await ask("\nEnter number or room ID: ");
+      const num = parseInt(choice.trim(), 10);
+      const room = (!isNaN(num) && num >= 1 && num <= visible.length)
+        ? visible[num - 1]
+        : visible.find(r => r.id === choice.trim());
+
+      if (room) {
+        roomId = room.id;
+        if (room.type === "semi-private") {
+          accessCode = (await ask(`🔒 "${room.name}" requires a password: `)).trim();
+        }
+      } else {
+        roomId = choice.trim();
+      }
+    }
+  }
+
+  rl.close();
+
+  // Join the room on the same connection
+  const joinData = { roomId };
+  if (accessCode) joinData.accessCode = accessCode;
+  console.log(`\nJoining room ${roomId}…`);
+  socket.emit("join room", joinData);
+
+  socket.on("room joined", (data) => {
+    currentUserCount = data.users?.length ?? 0;
+    console.log(`[${new Date().toISOString()}] Joined! Users: ${currentUserCount}`);
+    sendMessage(socket, buildMessage());
+    reschedule(socket);
+  });
+
+  socket.on("user joined", () => { currentUserCount++; reschedule(socket); });
+  socket.on("user left",   () => { currentUserCount = Math.max(0, currentUserCount - 1); reschedule(socket); });
 }
 
 // ── Boot ─────────────────────────────────────────────────────
-const argRoomId = process.argv[2];
-
-if (argRoomId) {
-  startBot(argRoomId);
-} else {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question("Enter Room ID: ", (answer) => {
-    rl.close();
-    startBot(answer.trim());
-  });
-}
+const argRoomId = process.argv[2] ?? null;
+run(argRoomId).catch(err => {
+  console.error("Fatal:", err.message);
+  process.exit(1);
+});
